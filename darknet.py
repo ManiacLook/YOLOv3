@@ -285,10 +285,10 @@ def get_test_input():
 # blocks = parse_cfg("cfg/yolov3.cfg")
 # print(create_modules(blocks))
 
-# model = Darknet("cfg/yolov3.cfg")
-# inp = get_test_input()
-# pred = model(inp, torch.cuda.is_available())
-# print(pred)
-
 model = Darknet("cfg/yolov3.cfg")
-model.load_weights("yolov3.weights")
+inp = get_test_input()
+pred = model(inp, torch.cuda.is_available())
+print(pred.shape)
+
+# model = Darknet("cfg/yolov3.cfg")
+# model.load_weights("yolov3.weights")
