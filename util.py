@@ -42,14 +42,15 @@ def bbox_iou(box1, box2):
     return iou
 
 def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
-    batch_size = prediction.size(0)
-    stride = inp_dim // prediction.size(2)
-    grid_size = inp_dim // stride
+    batch_size = prediction.size(0)  # 批大小
+    stride = inp_dim // prediction.size(2)  # 步长
+    grid_size = inp_dim // stride  # 特征图尺寸
     bbox_attrs = 5 + num_classes  # 坐标+置信度+类别
-    num_anchors = len(anchors)
+    num_anchors = len(anchors)  # 使用的 anchor 个数
 
     prediction = prediction.view(batch_size, bbox_attrs * num_anchors, grid_size * grid_size)
     prediction = prediction.transpose(1, 2).contiguous()
+    # 将批次中每个特征图的每个单元格的每个边界框按维度 1 连接在一起
     prediction = prediction.view(batch_size, grid_size * grid_size * num_anchors, bbox_attrs)
     anchors = [(a[0] / stride, a[1] / stride) for a in anchors]
 
@@ -70,10 +71,9 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
         y_offset = y_offset.cuda()
 
     x_y_offset = torch.cat((x_offset, y_offset), 1).repeat(1, num_anchors).view(-1, 2).unsqueeze(0)
-
     prediction[:, :, :2] += x_y_offset
 
-    # 将 anchors 应用于边界框的尺寸
+    # 用 anchor 调整边界框尺寸
     # log space transform height and the width
     anchors = torch.FloatTensor(anchors)
 
@@ -84,36 +84,38 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA = True):
     prediction[:, :, 2:4] = torch.exp(prediction[:, :, 2:4]) * anchors
     # 将 sigmoid 激活应用于类分数
     prediction[:, :, 5:5 + num_classes] = torch.sigmoid((prediction[:, :, 5:5 + num_classes]))
-    # 将检测图的大小调整为输入图像的大小
+    # 将检测图的坐标和尺寸调整为输入图像的大小
     prediction[:, :, :4] *= stride
-
+    # (batch_size, grid_size * grid_size * num_anchors, bbox_attrs)
     return prediction
 
-def write_result(prediction, confidence, num_classes, nms_conf = 0.4):
+# 目标得分阈值化和非极大值抑制
+def write_result(prediction, confidence, num_classes, nms_conf=0.4):
     conf_mask = (prediction[:, :, 4] > confidence).float().unsqueeze(2)  # torch.Size([1, 10647, 1])
-    prediction = prediction * conf_mask  # 将objectness score低于confidence阈值的行清零，其余行不变
+    prediction = prediction * conf_mask  # 将 objectness score低于confidence 阈值的行清零，其余行不变
 
     box_corner = prediction.new(prediction.shape)
     # 左上角
     box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2  # 中心x-宽/2
-    box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
+    box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2  # 中心y-高/2
     # 右下角
-    box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2
-    box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2
+    box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2  # 中心x+宽/2
+    box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2  # 中心y+高/2
     prediction[:, :, :4] = box_corner[:, :, :4]
 
     batch_size = prediction.size(0)
     write = False
+    # 对 batch 中遍历每张图片
     for ind in range(batch_size):
         image_pred = prediction[ind]  # image Tensor
         # confidence threshholding
         # NMS
         max_conf, max_conf_score = torch.max(image_pred[:, 5:5 + num_classes], 1)
-        max_conf = max_conf.float().unsqueeze(1)  # 最大置信度
-        max_conf_score = max_conf_score.float().unsqueeze(1)  # 最大置信度索引
-        seq = (image_pred[:, :5], max_conf, max_conf_score)
+        max_conf = max_conf.float().unsqueeze(1)  # 最大置信度 torch.Size([10647, 1])
+        max_conf_score = max_conf_score.float().unsqueeze(1)  # 最大置信度索引 torch.Size([10647, 1])
+        seq = (image_pred[:, :5], max_conf, max_conf_score)  # 按列拼接 torch.Size([10647, 7])
         image_pred = torch.cat(seq, 1)
-
+        # 将 objectness score 低于 confidence 阈值的行去掉
         non_zero_ind = (torch.nonzero(image_pred[:, 4]))
         try:
             image_pred_ = image_pred[non_zero_ind.squeeze(), :].view(-1, 7)
@@ -126,19 +128,21 @@ def write_result(prediction, confidence, num_classes, nms_conf = 0.4):
         # Get the various classes detected in the image
         img_classes = unique(image_pred_[:, -1])  # -1 index holds the class index
 
+        # 遍历当前图片检测出的每个类别
         for cls in img_classes:
             # perform NMS
             # get the detections with one particular class
             cls_mask = image_pred_ * (image_pred_[:, -1] == cls).float().unsqueeze(1)
+            # image_pred_class 只保留当前类的检测框，并且去除置信度为 0 的检测框
             class_mask_ind = torch.nonzero(cls_mask[:, -2]).squeeze()
             image_pred_class = image_pred_[class_mask_ind].view(-1, 7)
 
-            # sort the detections such that the entry with the maximum objectness
-            # confidence is at the top
+            # sort the detections such that the entry with the maximum objectness confidence is at the top
             conf_sort_index = torch.sort(image_pred_class[:, 4], descending=True)[1]  # 获得objectness score降序排列的索引
             image_pred_class = image_pred_class[conf_sort_index]  # 对当前类别下的检测框按objectness score降序排列
-            idx = image_pred_class.size(0)  # Number of detections
+            idx = image_pred_class.size(0)  # Number of detections 检测出该类别的检测器数量
 
+            # 遍历检测出该类别的检测器
             for i in range(idx):
                 # Get the IOUs of all boxes that come after the one we are looking at in the loop
                 try:
@@ -156,19 +160,47 @@ def write_result(prediction, confidence, num_classes, nms_conf = 0.4):
                 # Remove the zero entries
                 non_zero_ind = torch.nonzero(image_pred_class[:, 4]).squeeze()
                 image_pred_class = image_pred_class[non_zero_ind].view(-1, 7)
-
+            # 指定 batch 中的图像索引
             batch_ind = image_pred_class.new(image_pred_class.size(0), 1).fill_(ind)
             # Repeat the batch_ind for as many detections of the class cls in the image
-            seq = batch_ind, image_pred_class
+            seq = batch_ind, image_pred_class  # shape （-1， 8）
 
             if not write:
                 output = torch.cat(seq, 1)
                 write = True
             else:
                 out = torch.cat(seq, 1)
-                output = torch.cat((output, out))
+                output = torch.cat((output, out))  # 按行连接
 
-        try:
-            return output
-        except:
-            return 0
+    try:
+        return output  # (D, 8)
+    except:
+        return 0
+
+def load_classes(namesfile):
+    fp = open(namesfile, "r")
+    names = fp.read().split("\n")[:-1]
+    return names
+
+def letterbox_image(img, inp_dim):
+    '''resize image with unchanged aspect ratio using padding'''
+    img_w, img_h = img.shape[1], img.shape[0]
+    w, h = inp_dim
+    new_w = int(img_w * min(w / img_w, h / img_h))
+    new_h = int(img_h * min(w / img_w, h / img_h))
+    resized_image = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+    # 图像中心是缩小的原图，周边用 128 填充
+    canvas = np.full((inp_dim[1], inp_dim[0], 3), 128)
+    canvas[(h - new_h) // 2:(h - new_h) // 2 + new_h, (w - new_w) // 2:(w - new_w) // 2 + new_w, :] = resized_image
+    return canvas
+
+def prep_image(img, inp_dim):
+    """
+    Prepare image for inputting to the neural network.
+    Returns a Variable
+    """
+    # (1 x c x h x w)
+    img = cv2.resize(img, (inp_dim, inp_dim))
+    img = img[:, :, ::-1].transpose((2, 0, 1)).copy()
+    img = torch.from_numpy(img).float().div(255.0).unsqueeze(0)
+    return img

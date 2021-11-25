@@ -14,7 +14,7 @@ class EmptyLayer(nn.Module):
 class DetectionLayer(nn.Module):
     def __init__(self, anchors):
         super(DetectionLayer, self).__init__()
-        self.anchors = anchors
+        self.anchors = anchors  # 创建 anchors 属性存 anchor
 
 def parse_cfg(cfgfile):
     """
@@ -24,34 +24,34 @@ def parse_cfg(cfgfile):
             network to be built. Block is represented as a dictionary in the list
     """
     file = open(cfgfile, 'r')
-    lines = file.read().split('\n')  # store the lines in a list
-    lines = [x for x in lines if len(x) > 0]  # get rid of the empty lines
-    lines = [x for x in lines if x[0] != '#']  # get rid of comments
-    lines = [x.rstrip().lstrip() for x in lines]  # get rid of fringe whitespaces
+    lines = file.read().split('\n')  # 存每一行
+    lines = [x for x in lines if len(x) > 0]  # 去掉空行
+    lines = [x for x in lines if x[0] != '#']  # 去掉注释
+    lines = [x.rstrip().lstrip() for x in lines]  # 去掉每一行的左右端的空格
 
     block = {}
     blocks = []
 
     for line in lines:
-        # 块名
+        # 网络块类型
         if line[0] == "[":              # This marks the start of a new block
             if len(block) != 0:         # If block is not empty, implies it is storing values of previous block.
                 blocks.append(block)    # add it the blocks list
                 block = {}              # re-init the block
-            block["type"] = line[1:-1].rstrip()
+            block["type"] = line[1:-1].rstrip()  # 网络块类型 "convolutional"、"yolo"......
         # 属性和属性值
         else:
             key, value = line.split("=")
             block[key.rstrip()] = value.lstrip()
-    blocks.append(block)
+    blocks.append(block)  # 添加最后一个网络块
 
     return blocks
 
 def create_modules(blocks):
     net_info = blocks[0]  # Captures the information about the input and pre-processing
-    module_list = nn.ModuleList()
-    prev_filters = 3  # 图像RGB通道数为3
-    output_filters = []
+    module_list = nn.ModuleList()  # 存每一个网络层
+    prev_filters = 3  # 输入图像RGB通道数为3
+    output_filters = []  # 存每一个网络层中的输出过滤器数量
 
     for index, x in enumerate(blocks[1:]):
         module = nn.Sequential()
@@ -60,21 +60,22 @@ def create_modules(blocks):
         # append to module_list
         if x["type"] == "convolutional":
             # Get the info about the layer
-            activation = x["activation"]
+            activation = x["activation"]  # 激活函数
+            # 批归一化、偏差
             try:
                 batch_normalize = int(x["batch_normalize"])
                 bias = False
             except:
                 batch_normalize = 0
                 bias = True
-
+            # 卷积层的其它属性
             filters = int(x["filters"])
             padding = int(x["pad"])
             kernel_size = int(x["size"])
             stride = int(x["stride"])
 
             if padding:
-                pad = (kernel_size - 1) // 2  # 保持输出维度与输入相同？？？
+                pad = (kernel_size - 1) // 2  # 保持输出尺寸与输入相同
             else:
                 pad = 0
 
@@ -94,10 +95,10 @@ def create_modules(blocks):
                 module.add_module("leaky_{0}".format(index), activn)
 
         # If it's an upsampling layer
-        # We use Bilinear2dUpsampling
+        # 使用双线性插值法
         elif x["type"] == "upsample":
             stride = int(x["stride"])
-            upsample = nn.Upsample(scale_factor=2, mode="bilinear")
+            upsample = nn.Upsample(scale_factor=stride, mode="bilinear", align_corners=True)
             module.add_module("upsample_{0}".format(index), upsample)
         # If it is a route layer
         elif x["type"] == "route":
@@ -117,14 +118,17 @@ def create_modules(blocks):
             route = EmptyLayer()
             module.add_module("route_{0}".format(index), route)
             if end < 0:
+                # 两层的特征图连接后，route 层的输出通道数为两个特征图输出通道数相加
                 filters = output_filters[index + start] + output_filters[index + end]
             else:
+                # route层的输出通道数 = 指定的之前的某一层的输出通道数
                 filters = output_filters[index + start]
         # shortcut corresponds to skip connection
         elif x["type"] == "shortcut":
             shortcut = EmptyLayer()
             module.add_module("shortcut_{0}".format(index), shortcut)
         # Yolo is the detection layer
+        # 获得指定的 anchor
         elif x["type"] == "yolo":
             mask = x["mask"].split(",")
             mask = [int(x) for x in mask]
@@ -149,7 +153,7 @@ class Darknet(nn.Module):
         self.blocks = parse_cfg(cfgfile)
         self.net_info, self.module_list = create_modules(self.blocks)
 
-    def forward(self, x, CUDA):  # x是当前层输出，即图像特征
+    def forward(self, x, CUDA):  # x 是当前层输入，即图像特征
         modules = self.blocks[1:]
         outputs = {}  # We cache the outputs for the route layer
 
@@ -158,7 +162,7 @@ class Darknet(nn.Module):
             module_type = (module["type"])
 
             if module_type == "convolutional" or module_type == "upsample":
-                x = self.module_list[i](x)
+                x = self.module_list[i](x)  # 进行卷积或上采样
 
             elif module_type == "route":
                 layers = module["layers"]
@@ -174,24 +178,26 @@ class Darknet(nn.Module):
                         layers[1] = layers[1] - i
                     map1 = outputs[i + layers[0]]
                     map2 = outputs[i + layers[1]]
-
+                    # 连接特征图
                     x = torch.cat((map1, map2), 1)
 
             elif module_type == "shortcut":
                 from_ = int(module["from"])
+                # 两层特征图相加
                 x = outputs[i - 1] + outputs[i + from_]
 
             elif module_type == "yolo":
+                # 获得当前尺度下的 anchor
                 anchors = self.module_list[i][0].anchors
-                # Get the input dimensions
+                # 输入图像的尺寸
                 inp_dim = int(self.net_info["height"])
-                # Get the number of classes
+                # 分类个数
                 num_classes = int(module["classes"])
 
-                # Transform
+                # 转换特征图形状
                 x = x.data
                 x = predict_transform(x, inp_dim, anchors, num_classes, CUDA)
-                if not write:  #if no collector has been intialised
+                if not write:  # 还没初始化
                     detections = x
                     write = 1
                 else:
@@ -222,7 +228,7 @@ class Darknet(nn.Module):
             # Otherwise ignore.
             if model_type == "convolutional":
                 model = self.module_list[i]
-                try:
+                try:  # 批量规范层
                     batch_normalize = int(self.blocks[i + 1]["batch_normalize"])
                 except:
                     batch_normalize = 0
@@ -276,19 +282,22 @@ class Darknet(nn.Module):
 def get_test_input():
     img = cv2.imread("dog-cycle-car.png")
     img = cv2.resize(img, (416, 416))  # Resize to the input dimension
-    img_ = img[:, :, ::-1].transpose((2, 0, 1))  # BGR -> RGB | H X W X C -> C X H X W
+    img_ = img[:, :, ::-1].transpose((2, 0, 1))  # BGR -> RGB & H X W X C -> C X H X W
     img_ = img_[np.newaxis, :, :, :] / 255.0  # Add a channel at 0 (for batch) | Normalise
     img_ = torch.from_numpy(img_).float()  # Convert to float
     img_ = Variable(img_)  # Convert to Variable 方便求梯度
     return img_
 
+# 测试创建网络模块
 # blocks = parse_cfg("cfg/yolov3.cfg")
 # print(create_modules(blocks))
 
-model = Darknet("cfg/yolov3.cfg")
-inp = get_test_input()
-pred = model(inp, torch.cuda.is_available())
-print(pred.shape)
+# 测试前向传播
+# model = Darknet("cfg/yolov3.cfg")
+# inp = get_test_input()
+# pred = model(inp, torch.cuda.is_available())
+# print(pred.shape)
 
+# 测试加载权重
 # model = Darknet("cfg/yolov3.cfg")
 # model.load_weights("yolov3.weights")
