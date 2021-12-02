@@ -191,7 +191,8 @@ def write(x, results, color):
 
 list(map(lambda x: write(x, loaded_ims, colors[0]), output))
 
-det_names = pd.Series(imlist).apply(lambda x: "{}\det_{}".format("\\".join(x.split("\\")[:-1]) + "\\" + args.det, x.split("\\")[-1]))
+# det_names = pd.Series(imlist).apply(lambda x: "{}\det_{}".format("\\".join(x.split("\\")[:-1]) + "\\" + args.det, x.split("\\")[-1]))
+det_names = pd.Series(imlist).apply(lambda x: "{}/det_{}".format(args.det, x.split("/")[-1]))
 
 list(map(cv2.imwrite, det_names, loaded_ims))
 end = time.time()
